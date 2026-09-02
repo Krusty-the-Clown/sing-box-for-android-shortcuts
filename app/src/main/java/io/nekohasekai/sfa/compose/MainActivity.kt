@@ -223,6 +223,8 @@ class MainActivity :
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        if (handleShortcut(intent)) return
         handleIntent(intent)
     }
 
@@ -1354,4 +1356,3 @@ class MainActivity :
         return false
     }
 }
-

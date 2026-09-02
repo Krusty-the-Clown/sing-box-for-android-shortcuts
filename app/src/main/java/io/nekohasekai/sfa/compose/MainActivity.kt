@@ -195,6 +195,7 @@ class MainActivity :
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (handleShortcut(intent)) return
         enableEdgeToEdge()
 
         connection.reconnect()
@@ -1317,5 +1318,40 @@ class MainActivity :
                 }
             },
         )
+   }
+    private fun handleShortcut(currentIntent: android.content.Intent?): Boolean {
+        val action = currentIntent?.action
+        if (action == "io.nekohasekai.sfa.ACTION_START" || action == "io.nekohasekai.sfa.ACTION_STOP") {
+            if (action == "io.nekohasekai.sfa.ACTION_STOP") {
+                if (Settings.startedByUser) {
+                    try {
+                        io.nekohasekai.sfa.bg.BoxService.stop()
+                        Settings.startedByUser = false
+                    } catch (e: Exception) {
+                        Log.d("MainActivity", "shortcut stop failed: ${e.message}")
+                    }
+                }
+                finish()
+            } else {
+                if (!Settings.startedByUser) {
+                    try {
+                        startService()
+                        moveTaskToBack(true)
+                        lifecycleScope.launch {
+                            delay(1000)
+                            finish()
+                        }
+                    } catch (e: Exception) {
+                        Log.d("MainActivity", "shortcut start failed: ${e.message}")
+                        finish()
+                    }
+                } else {
+                    finish()
+                }
+            }
+            return true
+        }
+        return false
     }
 }
+

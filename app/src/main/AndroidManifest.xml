@@ -142,6 +142,14 @@
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
+                        <!-- НАЧАЛО: Фильтр для фонового переключения -->
+            <intent-filter>
+                <action android:name="io.nekohasekai.sfa.ACTION_START" />
+                <action android:name="io.nekohasekai.sfa.ACTION_STOP" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
+            <!-- КОНЕЦ -->
             <meta-data
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="true" />

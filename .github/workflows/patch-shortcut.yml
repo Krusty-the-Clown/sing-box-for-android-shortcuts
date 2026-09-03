@@ -1,0 +1,107 @@
+name: Patch SFA shortcut
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Тег релиза sing-box-for-android (пусто = последний)'
+        required: false
+        default: ''
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Resolve release and download official APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list -R SagerNet/sing-box-for-android -L 1 --json tagName -q '.[0].tagName')
+          fi
+          echo "Using release: $TAG"
+          gh release download "$TAG" -R SagerNet/sing-box-for-android -p "*arm64-v8a*.apk" -D /tmp/apk
+          ORIG_APK=$(find /tmp/apk -name "*.apk" | head -n1)
+          echo "ORIG_APK=$ORIG_APK" >> $GITHUB_ENV
+
+      - name: Install apktool + Android build-tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y apksigner zipalign android-sdk-build-tools 2>/dev/null || true
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.11.1.jar -O /usr/local/bin/apktool.jar
+          chmod +x /usr/local/bin/apktool
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 -type d | sort -V | tail -n1)
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> $GITHUB_ENV
+
+      - name: Decompile
+        run: apktool d "$ORIG_APK" -o sfa-patched
+
+      - name: Check whether ACTION_TOGGLE actually exists in the app
+        run: |
+          echo "=== searching smali for toggle-related actions ==="
+          grep -r "ACTION_TOGGLE\|const-string.*TOGGLE\|TileService" sfa-patched/smali* 2>/dev/null | head -50 || echo "NOTHING FOUND — this action likely does not exist"
+
+      - name: Add shortcut resources
+        run: |
+          mkdir -p sfa-patched/res/xml
+          cat > sfa-patched/res/values/shortcuts_strings.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="shortcut_short_label">sing-box Toggle</string>
+              <string name="shortcut_long_label">Toggle sing-box VPN</string>
+          </resources>
+          EOF
+          cat > sfa-patched/res/xml/shortcuts.xml << 'EOF'
+          <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+              <shortcut
+                  android:shortcutId="singbox_toggle"
+                  android:enabled="true"
+                  android:icon="@drawable/ic_launcher_foreground"
+                  android:shortcutShortLabel="@string/shortcut_short_label"
+                  android:shortcutLongLabel="@string/shortcut_long_label">
+                  <intent
+                      android:action="android.intent.action.MAIN"
+                      android:targetPackage="io.nekohasekai.sfa"
+                      android:targetClass="io.nekohasekai.sfa.ui.MainActivity" />
+              </shortcut>
+          </shortcuts>
+          EOF
+
+      - name: Insert meta-data into manifest
+        run: |
+          python3 - << 'EOF'
+          import re
+          p = "sfa-patched/AndroidManifest.xml"
+          s = open(p, encoding="utf-8").read()
+          marker = '<action android:name="android.intent.action.MAIN"/>'
+          idx = s.find(marker)
+          # insert meta-data right after the activity tag that owns this intent-filter closes
+          act_start = s.rfind("<activity", 0, idx)
+          act_close = s.find("</activity>", idx)
+          meta = '<meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>'
+          s = s[:act_close] + meta + s[act_close:]
+          open(p, "w", encoding="utf-8").write(s)
+          EOF
+
+      - name: Rebuild
+        run: apktool b sfa-patched -o sfa-unsigned.apk
+
+      - name: Generate debug key and sign
+        run: |
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=debug,O=debug,C=US"
+          $BUILD_TOOLS/zipalign -v 4 sfa-unsigned.apk sfa-aligned.apk
+          $BUILD_TOOLS/apksigner sign --ks debug.keystore --ks-pass pass:android --ks-key-alias androiddebugkey sfa-aligned.apk
+          mv sfa-aligned.apk sfa-patched-signed.apk
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sfa-patched-apk
+          path: sfa-patched-signed.apk

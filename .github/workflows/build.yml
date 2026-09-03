@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       app_ref:
-        description: 'Коммит/ветка приложения (пусто = stable HEAD). Укажите SHA, если stable временно не собирается.'
+        description: 'Коммит/ветка приложения (пусто = dev HEAD). Укажите SHA, если dev временно не собирается.'
         required: false
         default: ''
       core_tag:
-        description: 'Тег ИЛИ commit SHA ядра sing-box (пусто = автопоиск максимального beta/rc). Например: v1.14.0-rc.1 или 8dd67a1e49711ce8a9a884bef60a2139ef36446f'
+        description: 'Тег ИЛИ commit SHA ядра sing-box (пусто = автопоиск самой свежей версии с готовым .aar). Например: v1.14.0-rc.5'
         required: false
-        default: 'v1.13.21'
+        default: ''
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: stable
+          ref: dev
           submodules: recursive
           fetch-depth: 0
 
@@ -36,7 +36,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Resolve core tag (manual override or auto beta/rc search)
+      - name: Resolve core tag (manual override or auto newest-with-aar search)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -99,7 +99,7 @@ jobs:
             done <<< "$CANDIDATES"
 
             if [ -z "$TARGET_TAG" ]; then
-              echo "❌ Ни у одного тега не нашлось готовой CI-сборки Build"
+              echo "❌ Ни у одного тега не нашлось готовой CI-сборки Build с .aar"
               exit 1
             fi
           fi
@@ -112,24 +112,6 @@ jobs:
           echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
           echo "CORE_SHA=$CORE_SHA" >> $GITHUB_ENV
           echo "CORE_DATE=$CORE_DATE" >> $GITHUB_ENV
-
-      - name: Check for "Bump version" marker (informational only, no checkout)
-        if: ${{ github.event.inputs.app_ref == '' }}
-        run: |
-          TAG_NO_V="${TARGET_TAG#v}"
-          echo "Ищем точный коммит 'Bump version $TAG_NO_V' (только для справки, не переключаемся)..."
-          BUMP_SHA=$(git log origin/stable --all --grep="Bump version $TAG_NO_V" --fixed-strings -n1 --format=%H)
-
-          if [ -n "$BUMP_SHA" ]; then
-            echo "ℹ️ Автор синхронизировал приложение с этой версией ядра в коммите: $BUMP_SHA"
-            if git merge-base --is-ancestor "$BUMP_SHA" HEAD 2>/dev/null; then
-              echo "✅ Этот коммит уже входит в историю текущего HEAD — версии согласованы, ничего переключать не нужно"
-            else
-              echo "⚠️ Этот коммит НЕ входит в историю текущего HEAD (разные ветки/форки) — используется как справка, но не как точка переключения"
-            fi
-          else
-            echo "ℹ️ Точного коммита 'Bump version $TAG_NO_V' не найдено — версии могут быть не идеально синхронизированы, но авто-подбор компилируемого коммита это не блокирует"
-          fi
 
       - name: Verify custom shortcut code is present
         run: |
@@ -186,15 +168,6 @@ jobs:
             gh run download $RUN_ID -R SagerNet/sing-box -n "$NAME" -D "/tmp/artifacts/$NAME"
           done <<< "$ARTIFACT_NAMES"
 
-          echo "=== Полное содержимое скачанных артефактов (для диагностики) ==="
-          find /tmp/artifacts -type f | while read -r f; do
-            echo "--- $f ---"
-            file "$f"
-            case "$f" in
-              *.zip|*.aar|*.apk) unzip -l "$f" 2>/dev/null | head -30 ;;
-            esac
-          done
-
           FOUND=0
           for aar_file in $(find /tmp/artifacts -type f -name "*.aar"); do
             if unzip -l "$aar_file" | grep -q "arm64-v8a/libbox.so"; then
@@ -206,52 +179,9 @@ jobs:
           done
 
           if [ $FOUND -eq 0 ]; then
-            echo "⚠️ Готового .aar-артефакта нет — компилирую libbox.aar из исходников sing-box@$TARGET_TAG"
-            echo "SKIP_PREBUILT=1" >> $GITHUB_ENV
+            echo "❌ Ошибка: подходящий файл ядра не найден"
+            exit 1
           fi
-
-      - name: Build libbox.aar from source (fallback when no prebuilt .aar exists)
-        if: ${{ env.SKIP_PREBUILT == '1' }}
-        run: |
-          set -e
-          GO_VERSION="1.24.0"
-          echo "Клонирую sing-box@$TARGET_TAG..."
-          git clone --depth 1 --branch "$TARGET_TAG" https://github.com/SagerNet/sing-box.git /tmp/sing-box-src
-
-          REQUIRED_GO=$(grep -m1 '^go ' /tmp/sing-box-src/go.mod | awk '{print $2}')
-          if [ -n "$REQUIRED_GO" ]; then
-            echo "go.mod требует Go $REQUIRED_GO — использую именно эту версию вместо $GO_VERSION"
-            GO_VERSION="$REQUIRED_GO"
-          fi
-
-          echo "Устанавливаю Go $GO_VERSION..."
-          curl -sSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
-          export PATH=/usr/local/go/bin:$PATH:$(go env GOPATH)/bin
-          export GOTOOLCHAIN=local
-          go version
-
-          echo "Ставлю gomobile/gobind v0.1.12..."
-          go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
-          go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
-
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME (из preinstalled Android SDK на runner'е)"
-          gomobile init
-
-          cd /tmp/sing-box-src
-          VERSION=$(echo "$TARGET_TAG" | sed 's/^v//')
-          echo "Собираю libbox.aar (версия $VERSION, это может занять 10-20 минут)..."
-          gomobile bind -v -androidapi 21 -trimpath \
-            -ldflags "-X github.com/sagernet/sing-box/constant.Version=$VERSION -s -w -buildid=" \
-            -tags "with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_conntrack" \
-            -target android \
-            -javapkg io.nekohasekai \
-            -o /tmp/sing-box-src/libbox.aar \
-            ./experimental/libbox
-
-          mkdir -p "$GITHUB_WORKSPACE/app/libs"
-          cp /tmp/sing-box-src/libbox.aar "$GITHUB_WORKSPACE/app/libs/libbox.aar"
-          echo "✅ Собрано и скопировано libbox.aar"
 
       - name: Print embedded core version from libbox.aar (ground truth)
         run: |
@@ -272,7 +202,7 @@ jobs:
       - name: Auto-find newest commit that actually compiles
         if: ${{ github.event.inputs.app_ref == '' }}
         run: |
-          MAX_ATTEMPTS=15
+          MAX_ATTEMPTS=30
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             CURRENT=$(git rev-parse HEAD)

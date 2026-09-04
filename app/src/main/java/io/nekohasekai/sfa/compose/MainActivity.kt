@@ -1660,7 +1660,7 @@ class MainActivity :
             },
         )
     }
-}
+    
     private fun handleShortcut(currentIntent: android.content.Intent?): Boolean {
         val action = currentIntent?.action
         if (action == "io.nekohasekai.sfa.ACTION_START" || action == "io.nekohasekai.sfa.ACTION_STOP") {

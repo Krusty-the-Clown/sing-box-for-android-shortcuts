@@ -1,4 +1,4 @@
-name: Build APK
+name: Build APK (dev, source-matched core)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
         description: 'Коммит/ветка приложения (пусто = dev HEAD). Укажите SHA, если dev временно не собирается.'
         required: false
         default: ''
-      core_tag:
-        description: 'Тег ИЛИ commit SHA ядра sing-box (пусто = автопоиск самой свежей версии с готовым .aar). Например: v1.14.0-rc.5'
+      core_branch:
+        description: 'Ветка ядра sing-box для сборки из исходников (по умолчанию dev-next — аналог dev у приложения)'
         required: false
-        default: ''
+        default: 'dev-next'
 
 jobs:
   build:
@@ -30,103 +30,17 @@ jobs:
           git fetch origin "${{ github.event.inputs.app_ref }}" || true
           git checkout "${{ github.event.inputs.app_ref }}"
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-      - name: Resolve core tag (manual override or auto newest-with-aar search)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          MANUAL_TAG="${{ github.event.inputs.core_tag }}"
-
-          if [ -n "$MANUAL_TAG" ]; then
-            echo "Указан тег вручную: $MANUAL_TAG"
-            CORE_SHA=$(gh api "repos/SagerNet/sing-box/git/ref/tags/$MANUAL_TAG" -q '.object.sha')
-            if [ -z "$CORE_SHA" ] || [ "$CORE_SHA" == "null" ]; then
-              echo "❌ Тег $MANUAL_TAG не найден в репозитории SagerNet/sing-box"
-              exit 1
-            fi
-            TARGET_TAG="$MANUAL_TAG"
-          else
-            echo "Ищем самую свежую версию с готовым .aar-артефактом (релиз > rc > beta при равном номере)..."
-            ALL_TAGS=$(gh api repos/SagerNet/sing-box/tags --paginate)
-            CANDIDATES=$(echo "$ALL_TAGS" | jq -r '
-              [.[] | select(.name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-(beta|rc)\\.[0-9]+)?$"))
-               | . + {parsed: (.name | capture("^v(?<maj>[0-9]+)\\.(?<min>[0-9]+)\\.(?<pat>[0-9]+)(-(?<stage>beta|rc)\\.(?<num>[0-9]+))?$"))}
-               | . + {score: (
-                   (.parsed.maj | tonumber) * 1000000000
-                   + (.parsed.min | tonumber) * 1000000
-                   + (.parsed.pat | tonumber) * 1000
-                   + (if .parsed.stage == null then 900
-                      elif .parsed.stage == "rc" then 500 + (.parsed.num | tonumber)
-                      else (.parsed.num | tonumber) end)
-                 )}
-              ]
-              | sort_by(-.score)
-              | .[] | "\(.name) \(.commit.sha)"')
-
-            if [ -z "$CANDIDATES" ]; then
-              echo "❌ Подходящий тег не найден"
-              exit 1
-            fi
-
-            TARGET_TAG=""
-            while IFS= read -r line; do
-              CAND_TAG=$(echo "$line" | awk '{print $1}')
-              CAND_SHA=$(echo "$line" | awk '{print $2}')
-              RUN_CHECK=$(gh api "repos/SagerNet/sing-box/actions/runs?head_sha=${CAND_SHA}&status=success" \
-                -q '.workflow_runs[] | select(.name=="Build") | .id' | head -n1)
-
-              if [ -z "$RUN_CHECK" ]; then
-                echo "⏭️  У тега $CAND_TAG нет готовой CI-сборки Build, пробуем следующий по свежести"
-                continue
-              fi
-
-              AAR_ARTIFACT=$(gh api repos/SagerNet/sing-box/actions/runs/$RUN_CHECK/artifacts \
-                -q '.artifacts[] | select(.name | test("^libbox-android-"; "i")) | .name' | head -n1)
-
-              if [ -n "$AAR_ARTIFACT" ]; then
-                echo "✅ У тега $CAND_TAG есть готовый .aar-артефакт ($AAR_ARTIFACT в сборке $RUN_CHECK) — используем его"
-                TARGET_TAG="$CAND_TAG"
-                CORE_SHA="$CAND_SHA"
-                break
-              else
-                echo "⏭️  У тега $CAND_TAG сборка Build есть, но .aar-артефакта среди файлов нет (только бинарники/APK), пробуем следующий"
-              fi
-            done <<< "$CANDIDATES"
-
-            if [ -z "$TARGET_TAG" ]; then
-              echo "❌ Ни у одного тега не нашлось готовой CI-сборки Build с .aar"
-              exit 1
-            fi
-          fi
-
-          echo "Тег ядра: $TARGET_TAG ($CORE_SHA)"
-
-          CORE_DATE=$(gh api repos/SagerNet/sing-box/commits/$CORE_SHA -q '.commit.committer.date')
-          echo "Дата коммита ядра: $CORE_DATE"
-
-          echo "TARGET_TAG=$TARGET_TAG" >> $GITHUB_ENV
-          echo "CORE_SHA=$CORE_SHA" >> $GITHUB_ENV
-          echo "CORE_DATE=$CORE_DATE" >> $GITHUB_ENV
-
       - name: Verify custom shortcut code is present
         run: |
           MISSING=0
-
           if ! grep -q "ACTION_START" app/src/main/res/xml/shortcuts.xml 2>/dev/null; then
             echo "⚠️ shortcuts.xml не содержит наших правок"
             MISSING=1
           fi
-
           if ! grep -q "handleShortcut" app/src/main/java/io/nekohasekai/sfa/compose/MainActivity.kt 2>/dev/null; then
             echo "⚠️ MainActivity.kt не содержит handleShortcut"
             MISSING=1
           fi
-
           if [ "$MISSING" -eq 1 ]; then
             echo "❌ Кастомный код ярлыков не найден в текущем чекауте — проверьте, закоммичены ли правки"
             exit 1
@@ -134,54 +48,64 @@ jobs:
             echo "✅ Правки на месте"
           fi
 
-      - name: Download official libbox.aar (matching resolved tag)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Clone sing-box core (matching branch) and read required Go version
         run: |
-          mkdir -p app/libs
-          echo "Ищем прогон workflow Build по SHA коммита ядра: $CORE_SHA"
-          RUN_ID=$(gh api "repos/SagerNet/sing-box/actions/runs?head_sha=${CORE_SHA}&status=success" \
-            -q '.workflow_runs[] | select(.name=="Build") | .id' | head -n1)
+          CORE_BRANCH="${{ github.event.inputs.core_branch }}"
+          if [ -z "$CORE_BRANCH" ]; then
+            CORE_BRANCH="dev-next"
+          fi
+          echo "Клонирую sing-box@$CORE_BRANCH..."
+          git clone --depth 1 --branch "$CORE_BRANCH" https://github.com/SagerNet/sing-box.git /tmp/sing-box-src
+          CORE_SHA=$(git -C /tmp/sing-box-src rev-parse HEAD)
+          CORE_DATE=$(git -C /tmp/sing-box-src log -1 --format=%cI)
+          echo "Ядро: ветка $CORE_BRANCH, коммит $CORE_SHA, дата $CORE_DATE"
 
-          if [ -z "$RUN_ID" ]; then
-            echo "❌ Успешного прогона workflow Build для коммита $CORE_SHA не нашлось"
-            echo "Все прогоны для этого коммита (для диагностики):"
-            gh api "repos/SagerNet/sing-box/actions/runs?head_sha=${CORE_SHA}" \
-              -q '.workflow_runs[] | "\(.name) — \(.conclusion) — \(.html_url)"'
+          REQUIRED_GO=$(grep -m1 '^go ' /tmp/sing-box-src/go.mod | awk '{print $2}')
+          if [ -z "$REQUIRED_GO" ]; then
+            REQUIRED_GO="1.24.0"
+          fi
+          echo "Требуемая версия Go: $REQUIRED_GO"
+
+          echo "CORE_BRANCH=$CORE_BRANCH" >> $GITHUB_ENV
+          echo "CORE_SHA=$CORE_SHA" >> $GITHUB_ENV
+          echo "CORE_DATE=$CORE_DATE" >> $GITHUB_ENV
+          echo "REQUIRED_GO=$REQUIRED_GO" >> $GITHUB_ENV
+
+      - name: Build libbox.aar from source (official build_libbox script)
+        run: |
+          set -e
+          echo "Устанавливаю Go $REQUIRED_GO..."
+          curl -sSL "https://go.dev/dl/go${REQUIRED_GO}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          export PATH=/usr/local/go/bin:$PATH:$(go env GOPATH)/bin
+          export GOTOOLCHAIN=local
+          go version
+
+          echo "Ставлю gomobile/gobind v0.1.12..."
+          go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.12
+          go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.12
+          gomobile init
+
+          cd /tmp/sing-box-src
+          echo "Собираю через официальный скрипт cmd/internal/build_libbox (как это делает сам автор)..."
+          go run ./cmd/internal/build_libbox -target android
+
+          AAR_PATH=$(find /tmp/sing-box-src -maxdepth 1 -name "libbox.aar")
+          if [ -z "$AAR_PATH" ]; then
+            echo "❌ build_libbox не создал libbox.aar в ожидаемом месте"
+            find /tmp/sing-box-src -maxdepth 1 -type f
             exit 1
           fi
-          echo "ID сборки: $RUN_ID"
 
-          echo "Артефакты этого запуска:"
-          gh api repos/SagerNet/sing-box/actions/runs/$RUN_ID/artifacts -q '.artifacts[].name'
-
-          ARTIFACT_NAMES=$(gh api repos/SagerNet/sing-box/actions/runs/$RUN_ID/artifacts \
-            -q '.artifacts[] | select(.name | test("android|aar|libbox"; "i")) | .name')
-
-          if [ -z "$ARTIFACT_NAMES" ]; then
-            echo "❌ Среди артефактов сборки $RUN_ID нет ничего похожего на android/aar/libbox"
-            exit 1
-          fi
-
-          while IFS= read -r NAME; do
-            echo "Скачиваю артефакт: $NAME"
-            gh run download $RUN_ID -R SagerNet/sing-box -n "$NAME" -D "/tmp/artifacts/$NAME"
-          done <<< "$ARTIFACT_NAMES"
-
-          FOUND=0
-          for aar_file in $(find /tmp/artifacts -type f -name "*.aar"); do
-            if unzip -l "$aar_file" | grep -q "arm64-v8a/libbox.so"; then
-              echo "✅ Найдено ядро $TARGET_TAG в: $aar_file"
-              cp "$aar_file" app/libs/libbox.aar
-              FOUND=1
-              break
-            fi
-          done
-
-          if [ $FOUND -eq 0 ]; then
-            echo "❌ Ошибка: подходящий файл ядра не найден"
-            exit 1
-          fi
+          mkdir -p "$GITHUB_WORKSPACE/app/libs"
+          cp "$AAR_PATH" "$GITHUB_WORKSPACE/app/libs/libbox.aar"
+          echo "✅ Собрано и скопировано libbox.aar (ветка $CORE_BRANCH, коммит $CORE_SHA)"
 
       - name: Print embedded core version from libbox.aar (ground truth)
         run: |
@@ -191,10 +115,10 @@ jobs:
           if [ -z "$SO_FILE" ]; then
             echo "⚠️ Не удалось найти libbox.so внутри aar для проверки"
           else
-            echo "Версия, реально зашитая в $SO_FILE:"
-            strings "$SO_FILE" | grep -E "^v?1\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$" | sort -u | head -20
+            echo "Версия/строки внутри $SO_FILE:"
+            strings "$SO_FILE" | grep -E "^v?[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$" | sort -u | head -20
           fi
-          echo "(Для сравнения: целевой тег из шага резолва — $TARGET_TAG)"
+          echo "(Для сравнения: ядро собрано с ветки $CORE_BRANCH, коммит $CORE_SHA, дата $CORE_DATE)"
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -202,7 +126,7 @@ jobs:
       - name: Auto-find newest commit that actually compiles
         if: ${{ github.event.inputs.app_ref == '' }}
         run: |
-          MAX_ATTEMPTS=30
+          MAX_ATTEMPTS=15
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             CURRENT=$(git rev-parse HEAD)
@@ -219,7 +143,6 @@ jobs:
             echo "❌ За $MAX_ATTEMPTS попыток не нашли компилируемый коммит"
             exit 1
           fi
-
           if ! grep -q "handleShortcut" app/src/main/java/io/nekohasekai/sfa/compose/MainActivity.kt 2>/dev/null; then
             echo "❌ Откатились дальше, чем наш коммит с правками — handleShortcut больше не найден"
             exit 1

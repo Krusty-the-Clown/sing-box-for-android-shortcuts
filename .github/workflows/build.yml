@@ -54,11 +54,25 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: List available sing-box branches (diagnostic)
+        run: |
+          echo "Реальные ветки репозитория SagerNet/sing-box:"
+          git ls-remote --heads https://github.com/SagerNet/sing-box.git | awk -F'refs/heads/' '{print $2}'
+
       - name: Clone sing-box core (matching branch) and read required Go version
         run: |
           CORE_BRANCH="${{ github.event.inputs.core_branch }}"
           if [ -z "$CORE_BRANCH" ]; then
             CORE_BRANCH="dev-next"
+          fi
+          echo "Проверяю, существует ли ветка $CORE_BRANCH..."
+          if ! git ls-remote --exit-code --heads https://github.com/SagerNet/sing-box.git "$CORE_BRANCH" > /dev/null; then
+            echo "⚠️ Ветка $CORE_BRANCH не найдена, пробую 'dev' как запасной вариант..."
+            CORE_BRANCH="dev"
+            if ! git ls-remote --exit-code --heads https://github.com/SagerNet/sing-box.git "$CORE_BRANCH" > /dev/null; then
+              echo "❌ Ни dev-next, ни dev не найдены — смотрите список веток в предыдущем шаге и укажите нужную вручную через поле core_branch"
+              exit 1
+            fi
           fi
           echo "Клонирую sing-box@$CORE_BRANCH..."
           git clone --depth 1 --branch "$CORE_BRANCH" https://github.com/SagerNet/sing-box.git /tmp/sing-box-src

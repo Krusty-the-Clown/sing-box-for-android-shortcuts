@@ -8,9 +8,9 @@ on:
         required: false
         default: ''
       core_branch:
-        description: 'Ветка ядра sing-box для сборки из исходников (по умолчанию dev-next — аналог dev у приложения)'
+        description: 'Ветка ядра sing-box для сборки из исходников (пусто = автовыбор unstable/testing)'
         required: false
-        default: 'dev-next'
+        default: ''
 
 jobs:
   build:
@@ -63,14 +63,14 @@ jobs:
         run: |
           CORE_BRANCH="${{ github.event.inputs.core_branch }}"
           if [ -z "$CORE_BRANCH" ]; then
-            CORE_BRANCH="dev-next"
+            CORE_BRANCH="unstable"
           fi
           echo "Проверяю, существует ли ветка $CORE_BRANCH..."
           if ! git ls-remote --exit-code --heads https://github.com/SagerNet/sing-box.git "$CORE_BRANCH" > /dev/null; then
-            echo "⚠️ Ветка $CORE_BRANCH не найдена, пробую 'dev' как запасной вариант..."
-            CORE_BRANCH="dev"
+            echo "⚠️ Ветка $CORE_BRANCH не найдена, пробую 'testing' как запасной вариант..."
+            CORE_BRANCH="testing"
             if ! git ls-remote --exit-code --heads https://github.com/SagerNet/sing-box.git "$CORE_BRANCH" > /dev/null; then
-              echo "❌ Ни dev-next, ни dev не найдены — смотрите список веток в предыдущем шаге и укажите нужную вручную через поле core_branch"
+              echo "❌ Ни unstable, ни testing не найдены — смотрите список веток в предыдущем шаге и укажите нужную вручную через поле core_branch"
               exit 1
             fi
           fi
